@@ -1,0 +1,483 @@
+ This Python 3 environment comes with many helpful analytics libraries installed
+# It is defined by the kaggle/python docker image: https://github.com/kaggle/docker-python
+# For example, here's several helpful packages to load in 
+
+import numpy as np
+import pandas as pd
+import lightgbm as lgb
+import datetime
+import math
+import gc
+
+
+# Input data files are available in the "../input/" directory.
+# For example, running this (by clicking run or pressing Shift+Enter) will list the files in the input directory
+
+from subprocess import check_output
+print(check_output(["ls", "../input"]).decode("utf8"))
+
+# Any results you write to the current directory are saved as output.
+members.csv
+sample_submission.csv
+song_extra_info.csv
+songs.csv
+test.csv
+train.csv
+
+In [2]:
+print('Loading data...')
+data_path = '../input/'
+train = pd.read_csv(data_path + 'train.csv', dtype={'msno' : 'category',
+                                                'source_system_tab' : 'category',
+                                                  'source_screen_name' : 'category',
+                                                  'source_type' : 'category',
+                                                  'target' : np.uint8,
+                                                  'song_id' : 'category'})
+test = pd.read_csv(data_path + 'test.csv', dtype={'msno' : 'category',
+                                                'source_system_tab' : 'category',
+                                                'source_screen_name' : 'category',
+                                                'source_type' : 'category',
+                                                'song_id' : 'category'})
+songs = pd.read_csv(data_path + 'songs.csv',dtype={'genre_ids': 'category',
+                                                  'language' : 'category',
+                                                  'artist_name' : 'category',
+                                                  'composer' : 'category',
+                                                  'lyricist' : 'category',
+                                                  'song_id' : 'category'})
+members = pd.read_csv(data_path + 'members.csv',dtype={'city' : 'category',
+                                                      'bd' : np.uint8,
+                                                      'gender' : 'category',
+                                                      'registered_via' : 'category'},
+                     parse_dates=['registration_init_time','expiration_date'])
+songs_extra = pd.read_csv(data_path + 'song_extra_info.csv')
+print('Done loading...')
+Loading data...
+---------------------------------------------------------------------------
+TypeError                                 Traceback (most recent call last)
+<ipython-input-2-6e0df5b8adcf> in <module>()
+      6                                                   'source_type' : 'category',
+      7                                                   'target' : np.uint8,
+----> 8                                                   'song_id' : 'category'})
+      9 test = pd.read_csv(data_path + 'test.csv', dtype={'msno' : 'category',
+     10                                                 'source_system_tab' : 'category',
+
+/opt/conda/lib/python3.6/site-packages/pandas/io/parsers.py in parser_f(filepath_or_buffer, sep, delimiter, header, names, index_col, usecols, squeeze, prefix, mangle_dupe_cols, dtype, engine, converters, true_values, false_values, skipinitialspace, skiprows, nrows, na_values, keep_default_na, na_filter, verbose, skip_blank_lines, parse_dates, infer_datetime_format, keep_date_col, date_parser, dayfirst, iterator, chunksize, compression, thousands, decimal, lineterminator, quotechar, quoting, escapechar, comment, encoding, dialect, tupleize_cols, error_bad_lines, warn_bad_lines, skipfooter, skip_footer, doublequote, delim_whitespace, as_recarray, compact_ints, use_unsigned, low_memory, buffer_lines, memory_map, float_precision)
+    703                     skip_blank_lines=skip_blank_lines)
+    704 
+--> 705         return _read(filepath_or_buffer, kwds)
+    706 
+    707     parser_f.__name__ = name
+
+/opt/conda/lib/python3.6/site-packages/pandas/io/parsers.py in _read(filepath_or_buffer, kwds)
+    449 
+    450     try:
+--> 451         data = parser.read(nrows)
+    452     finally:
+    453         parser.close()
+
+/opt/conda/lib/python3.6/site-packages/pandas/io/parsers.py in read(self, nrows)
+   1063                 raise ValueError('skipfooter not supported for iteration')
+   1064 
+-> 1065         ret = self._engine.read(nrows)
+   1066 
+   1067         if self.options.get('as_recarray'):
+
+/opt/conda/lib/python3.6/site-packages/pandas/io/parsers.py in read(self, nrows)
+   1826     def read(self, nrows=None):
+   1827         try:
+-> 1828             data = self._reader.read(nrows)
+   1829         except StopIteration:
+   1830             if self._first_chunk:
+
+pandas/_libs/parsers.pyx in pandas._libs.parsers.TextReader.read()
+
+pandas/_libs/parsers.pyx in pandas._libs.parsers.TextReader._read_low_memory()
+
+pandas/_libs/parsers.pyx in pandas._libs.parsers._concatenate_chunks()
+
+/opt/conda/lib/python3.6/site-packages/numpy/core/numerictypes.py in find_common_type(array_types, scalar_types)
+   1013 
+   1014     """
+-> 1015     array_types = [dtype(x) for x in array_types]
+   1016     scalar_types = [dtype(x) for x in scalar_types]
+   1017 
+
+/opt/conda/lib/python3.6/site-packages/numpy/core/numerictypes.py in <listcomp>(.0)
+   1013 
+   1014     """
+-> 1015     array_types = [dtype(x) for x in array_types]
+   1016     scalar_types = [dtype(x) for x in scalar_types]
+   1017 
+
+TypeError: data type not understood
+In [3]:
+print('Data merging...')
+
+
+train = train.merge(songs, on='song_id', how='left')
+test = test.merge(songs, on='song_id', how='left')
+
+members['membership_days'] = members['expiration_date'].subtract(members['registration_init_time']).dt.days.astype(int)
+
+members['registration_year'] = members['registration_init_time'].dt.year
+members['registration_month'] = members['registration_init_time'].dt.month
+members['registration_date'] = members['registration_init_time'].dt.day
+
+members['expiration_year'] = members['expiration_date'].dt.year
+members['expiration_month'] = members['expiration_date'].dt.month
+members['expiration_date'] = members['expiration_date'].dt.day
+members = members.drop(['registration_init_time'], axis=1)
+
+def isrc_to_year(isrc):
+    if type(isrc) == str:
+        if int(isrc[5:7]) > 17:
+            return 1900 + int(isrc[5:7])
+        else:
+            return 2000 + int(isrc[5:7])
+    else:
+        return np.nan
+        
+songs_extra['song_year'] = songs_extra['isrc'].apply(isrc_to_year)
+songs_extra.drop(['isrc', 'name'], axis = 1, inplace = True)
+
+train = train.merge(members, on='msno', how='left')
+test = test.merge(members, on='msno', how='left')
+
+train = train.merge(songs_extra, on = 'song_id', how = 'left')
+train.song_length.fillna(200000,inplace=True)
+train.song_length = train.song_length.astype(np.uint32)
+train.song_id = train.song_id.astype('category')
+
+
+test = test.merge(songs_extra, on = 'song_id', how = 'left')
+test.song_length.fillna(200000,inplace=True)
+test.song_length = test.song_length.astype(np.uint32)
+test.song_id = test.song_id.astype('category')
+
+# import gc
+# del members, songs; gc.collect();
+
+print('Done merging...')
+Data merging...
+---------------------------------------------------------------------------
+NameError                                 Traceback (most recent call last)
+<ipython-input-3-1432efb892c8> in <module>()
+      2 
+      3 
+----> 4 train = train.merge(songs, on='song_id', how='left')
+      5 test = test.merge(songs, on='song_id', how='left')
+      6 
+
+NameError: name 'train' is not defined
+In [4]:
+print ("Adding new features")
+
+def genre_id_count(x):
+    if x == 'no_genre_id':
+        return 0
+    else:
+        return x.count('|') + 1
+
+train['genre_ids'].fillna('no_genre_id',inplace=True)
+test['genre_ids'].fillna('no_genre_id',inplace=True)
+train['genre_ids_count'] = train['genre_ids'].apply(genre_id_count).astype(np.int8)
+test['genre_ids_count'] = test['genre_ids'].apply(genre_id_count).astype(np.int8)
+
+def lyricist_count(x):
+    if x == 'no_lyricist':
+        return 0
+    else:
+        return sum(map(x.count, ['|', '/', '\\', ';'])) + 1
+    return sum(map(x.count, ['|', '/', '\\', ';']))
+
+train['lyricist'].fillna('no_lyricist',inplace=True)
+test['lyricist'].fillna('no_lyricist',inplace=True)
+train['lyricists_count'] = train['lyricist'].apply(lyricist_count).astype(np.int8)
+test['lyricists_count'] = test['lyricist'].apply(lyricist_count).astype(np.int8)
+
+def composer_count(x):
+    if x == 'no_composer':
+        return 0
+    else:
+        return sum(map(x.count, ['|', '/', '\\', ';'])) + 1
+
+train['composer'].fillna('no_composer',inplace=True)
+test['composer'].fillna('no_composer',inplace=True)
+train['composer_count'] = train['composer'].apply(composer_count).astype(np.int8)
+test['composer_count'] = test['composer'].apply(composer_count).astype(np.int8)
+
+def is_featured(x):
+    if 'feat' in str(x) :
+        return 1
+    return 0
+
+train['artist_name'].fillna('no_artist',inplace=True)
+test['artist_name'].fillna('no_artist',inplace=True)
+train['is_featured'] = train['artist_name'].apply(is_featured).astype(np.int8)
+test['is_featured'] = test['artist_name'].apply(is_featured).astype(np.int8)
+
+def artist_count(x):
+    if x == 'no_artist':
+        return 0
+    else:
+        return x.count('and') + x.count(',') + x.count('feat') + x.count('&')
+
+train['artist_count'] = train['artist_name'].apply(artist_count).astype(np.int8)
+test['artist_count'] = test['artist_name'].apply(artist_count).astype(np.int8)
+
+# if artist is same as composer
+train['artist_composer'] = (train['artist_name'] == train['composer']).astype(np.int8)
+test['artist_composer'] = (test['artist_name'] == test['composer']).astype(np.int8)
+
+
+# if artist, lyricist and composer are all three same
+train['artist_composer_lyricist'] = ((train['artist_name'] == train['composer']) & (train['artist_name'] == train['lyricist']) & (train['composer'] == train['lyricist'])).astype(np.int8)
+test['artist_composer_lyricist'] = ((test['artist_name'] == test['composer']) & (test['artist_name'] == test['lyricist']) & (test['composer'] == test['lyricist'])).astype(np.int8)
+
+# is song language 17 or 45. 
+def song_lang_boolean(x):
+    if '17.0' in str(x) or '45.0' in str(x):
+        return 1
+    return 0
+
+train['song_lang_boolean'] = train['language'].apply(song_lang_boolean).astype(np.int8)
+test['song_lang_boolean'] = test['language'].apply(song_lang_boolean).astype(np.int8)
+
+
+_mean_song_length = np.mean(train['song_length'])
+def smaller_song(x):
+    if x < _mean_song_length:
+        return 1
+    return 0
+
+train['smaller_song'] = train['song_length'].apply(smaller_song).astype(np.int8)
+test['smaller_song'] = test['song_length'].apply(smaller_song).astype(np.int8)
+
+# number of times a song has been played before
+_dict_count_song_played_train = {k: v for k, v in train['song_id'].value_counts().iteritems()}
+_dict_count_song_played_test = {k: v for k, v in test['song_id'].value_counts().iteritems()}
+def count_song_played(x):
+    try:
+        return _dict_count_song_played_train[x]
+    except KeyError:
+        try:
+            return _dict_count_song_played_test[x]
+        except KeyError:
+            return 0
+    
+
+train['count_song_played'] = train['song_id'].apply(count_song_played).astype(np.int64)
+test['count_song_played'] = test['song_id'].apply(count_song_played).astype(np.int64)
+
+# number of times the artist has been played
+_dict_count_artist_played_train = {k: v for k, v in train['artist_name'].value_counts().iteritems()}
+_dict_count_artist_played_test = {k: v for k, v in test['artist_name'].value_counts().iteritems()}
+def count_artist_played(x):
+    try:
+        return _dict_count_artist_played_train[x]
+    except KeyError:
+        try:
+            return _dict_count_artist_played_test[x]
+        except KeyError:
+            return 0
+
+train['count_artist_played'] = train['artist_name'].apply(count_artist_played).astype(np.int64)
+test['count_artist_played'] = test['artist_name'].apply(count_artist_played).astype(np.int64)
+
+
+print "Done adding features"
+  File "<ipython-input-4-3bc4a73ec5a5>", line 116
+    print "Done adding features"
+                               ^
+SyntaxError: Missing parentheses in call to 'print'. Did you mean print("Done adding features")?
+In [5]:
+print ("Train test and validation sets")
+for col in train.columns:
+    if train[col].dtype == object:
+        train[col] = train[col].astype('category')
+        test[col] = test[col].astype('category')
+
+
+X_train = train.drop(['target'], axis=1)
+y_train = train['target'].values
+
+
+X_test = test.drop(['id'], axis=1)
+ids = test['id'].values
+
+
+# del train, test; gc.collect();
+
+d_train_final = lgb.Dataset(X_train, y_train)
+watchlist_final = lgb.Dataset(X_train, y_train)
+print('Processed data...')
+Train test and validation sets
+---------------------------------------------------------------------------
+NameError                                 Traceback (most recent call last)
+<ipython-input-5-6f773e45101b> in <module>()
+      1 print ("Train test and validation sets")
+----> 2 for col in train.columns:
+      3     if train[col].dtype == object:
+      4         train[col] = train[col].astype('category')
+      5         test[col] = test[col].astype('category')
+
+NameError: name 'train' is not defined
+In [6]:
+params = {
+        'objective': 'binary',
+        'metric': 'binary_logloss',
+        'boosting': 'gbdt',
+        'learning_rate': 0.3 ,
+        'verbose': 0,
+        'num_leaves': 108,
+        'bagging_fraction': 0.95,
+        'bagging_freq': 1,
+        'bagging_seed': 1,
+        'feature_fraction': 0.9,
+        'feature_fraction_seed': 1,
+        'max_bin': 256,
+        'max_depth': 10,
+        'num_rounds': 200,
+        'metric' : 'auc'
+    }
+
+%time model_f1 = lgb.train(params, train_set=d_train_final,  valid_sets=watchlist_final, verbose_eval=5)
+---------------------------------------------------------------------------
+NameError                                 Traceback (most recent call last)
+<ipython-input-6-f357cb29e712> in <module>()
+     17     }
+     18 
+---> 19 get_ipython().magic('time model_f1 = lgb.train(params, train_set=d_train_final,  valid_sets=watchlist_final, verbose_eval=5)')
+
+/opt/conda/lib/python3.6/site-packages/IPython/core/interactiveshell.py in magic(self, arg_s)
+   2156         magic_name, _, magic_arg_s = arg_s.partition(' ')
+   2157         magic_name = magic_name.lstrip(prefilter.ESC_MAGIC)
+-> 2158         return self.run_line_magic(magic_name, magic_arg_s)
+   2159 
+   2160     #-------------------------------------------------------------------------
+
+/opt/conda/lib/python3.6/site-packages/IPython/core/interactiveshell.py in run_line_magic(self, magic_name, line)
+   2077                 kwargs['local_ns'] = sys._getframe(stack_depth).f_locals
+   2078             with self.builtin_trap:
+-> 2079                 result = fn(*args,**kwargs)
+   2080             return result
+   2081 
+
+<decorator-gen-59> in time(self, line, cell, local_ns)
+
+/opt/conda/lib/python3.6/site-packages/IPython/core/magic.py in <lambda>(f, *a, **k)
+    186     # but it's overkill for just that one bit of state.
+    187     def magic_deco(arg):
+--> 188         call = lambda f, *a, **k: f(*a, **k)
+    189 
+    190         if callable(arg):
+
+/opt/conda/lib/python3.6/site-packages/IPython/core/magics/execution.py in time(self, line, cell, local_ns)
+   1183         else:
+   1184             st = clock2()
+-> 1185             exec(code, glob, local_ns)
+   1186             end = clock2()
+   1187             out = None
+
+<timed exec> in <module>()
+
+NameError: name 'd_train_final' is not defined
+In [7]:
+params = {
+        'objective': 'binary',
+        'metric': 'binary_logloss',
+        'boosting': 'dart',
+        'learning_rate': 0.3 ,
+        'verbose': 0,
+        'num_leaves': 108,
+        'bagging_fraction': 0.95,
+        'bagging_freq': 1,
+        'bagging_seed': 1,
+        'feature_fraction': 0.9,
+        'feature_fraction_seed': 1,
+        'max_bin': 256,
+        'max_depth': 10,
+        'num_rounds': 200,
+        'metric' : 'auc'
+    }
+
+%time model_f2 = lgb.train(params, train_set=d_train_final,  valid_sets=watchlist_final, verbose_eval=5)
+---------------------------------------------------------------------------
+NameError                                 Traceback (most recent call last)
+<ipython-input-7-063832c731db> in <module>()
+     17     }
+     18 
+---> 19 get_ipython().magic('time model_f2 = lgb.train(params, train_set=d_train_final,  valid_sets=watchlist_final, verbose_eval=5)')
+
+/opt/conda/lib/python3.6/site-packages/IPython/core/interactiveshell.py in magic(self, arg_s)
+   2156         magic_name, _, magic_arg_s = arg_s.partition(' ')
+   2157         magic_name = magic_name.lstrip(prefilter.ESC_MAGIC)
+-> 2158         return self.run_line_magic(magic_name, magic_arg_s)
+   2159 
+   2160     #-------------------------------------------------------------------------
+
+/opt/conda/lib/python3.6/site-packages/IPython/core/interactiveshell.py in run_line_magic(self, magic_name, line)
+   2077                 kwargs['local_ns'] = sys._getframe(stack_depth).f_locals
+   2078             with self.builtin_trap:
+-> 2079                 result = fn(*args,**kwargs)
+   2080             return result
+   2081 
+
+<decorator-gen-59> in time(self, line, cell, local_ns)
+
+/opt/conda/lib/python3.6/site-packages/IPython/core/magic.py in <lambda>(f, *a, **k)
+    186     # but it's overkill for just that one bit of state.
+    187     def magic_deco(arg):
+--> 188         call = lambda f, *a, **k: f(*a, **k)
+    189 
+    190         if callable(arg):
+
+/opt/conda/lib/python3.6/site-packages/IPython/core/magics/execution.py in time(self, line, cell, local_ns)
+   1183         else:
+   1184             st = clock2()
+-> 1185             exec(code, glob, local_ns)
+   1186             end = clock2()
+   1187             out = None
+
+<timed exec> in <module>()
+
+NameError: name 'd_train_final' is not defined
+In [8]:
+print('Making predictions')
+p_test_1 = model_f1.predict(X_test)
+p_test_2 = model_f2.predict(X_test)
+p_test_avg = np.mean([p_test_1, p_test_2], axis = 0)
+
+
+print('Done making predictions')
+Making predictions
+---------------------------------------------------------------------------
+NameError                                 Traceback (most recent call last)
+<ipython-input-8-dc6069237382> in <module>()
+      1 print('Making predictions')
+----> 2 p_test_1 = model_f1.predict(X_test)
+      3 p_test_2 = model_f2.predict(X_test)
+      4 p_test_avg = np.mean([p_test_1, p_test_2], axis = 0)
+      5 
+
+NameError: name 'model_f1' is not defined
+In [9]:
+print ('Saving predictions Model model of gbdt')
+
+subm = pd.DataFrame()
+subm['id'] = ids
+subm['target'] = p_test_avg
+subm.to_csv(data_path + 'submission_lgbm_avg.csv.gz', compression = 'gzip', index=False, float_format = '%.5f')
+
+print('Done!')
+Saving predictions Model model of gbdt
+---------------------------------------------------------------------------
+NameError                                 Traceback (most recent call last)
+<ipython-input-9-2366982ed7da> in <module>()
+      2 
+      3 subm = pd.DataFrame()
+----> 4 subm['id'] = ids
+      5 subm['target'] = p_test_avg
+      6 subm.to_csv(data_path + 'submission_lgbm_avg.csv.gz', compression = 'gzip', index=False, float_format = '%.5f')
+
+NameError: name 'ids' is not defined
